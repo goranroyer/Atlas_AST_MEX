@@ -1,5 +1,5 @@
 # Atlas_AST_MEX
-Single nucleus data in the non-model organism *Astyanax mexicanus*
+Single nucleus RNA-seq atlas of the non-model organism *Astyanax mexicanus*
 
 ## A brief presentation of *Astyanax mexicanus*
 ```To be completed```
