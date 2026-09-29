@@ -5,7 +5,7 @@ Single nucleus RNA-seq atlas of the non-model organism *Astyanax mexicanus*
 ```To be completed```
 
 ## Aim of this Github project
-Allow to navigate in the snRNA-seq data from *Astyanax mexicanus*
+Allow to navigate in the snRNA-seq data from *Astyanax mexicanus* and reproduce the results of our paper (ajouter le doi)
 
 ## What’s available?
 - Analysis on the gene expression (Differentially expressed genes, Gene Ontology, clustering, ...)
