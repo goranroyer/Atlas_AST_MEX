@@ -18,6 +18,8 @@ Allow to navigate in the snRNA-seq data from *Astyanax mexicanus* and reproduce 
 ### From the DECA laboratory:
 - Sylvie Retaux
 - Jorge Torres Paz
+- François Agnès
+- Goran Royer
 ### Add Sergi lab
 - Sergi Roig Puiggros
 - Julien Prado
