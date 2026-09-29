@@ -23,3 +23,6 @@ Allow to navigate in the snRNA-seq data from *Astyanax mexicanus* and reproduce 
 ### Add Sergi lab
 - Sergi Roig Puiggros
 - Julien Prado
+
+## Shiny link
+https://astyanax.jablab.unige.ch/
