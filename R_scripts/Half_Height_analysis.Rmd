@@ -1,0 +1,837 @@
+---
+title: "Half_Height_analysis"
+author: "Goran Royer"
+date: "2026-09-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,dev="svg")
+```
+
+```{r Libraries}
+packages <- c("Seurat", "ggplot2","bmrm","tidysdm")
+invisible(lapply(packages, library, character.only = TRUE))
+rm(list=ls())
+```
+
+```{r Model functions}
+
+signal_smooth <- function(logcounts,pseudotime,at,sd) {
+  W <- outer(at,pseudotime,FUN="-") |>
+    dnorm(sd=sd)
+  W <- W/rowSums(W)
+  S <- tcrossprod(logcounts,W) |> as.matrix()
+  S
+}
+```
+
+
+```{r Dataset Loadings and Directory Creation }
+dir.create(".../Ordinal_waves")
+se <- readRDS(".../ORM_Pseudotime/obj_predicted.RDS")
+y0 <- readRDS(".../ORM_Pseudotime/Model_pseudotime_ngenes_cells_subset.RDS")
+```
+ 
+```{r, generate expression matrices and pseudotime}
+expr_matrix <- GetAssayData(se, slot = "data")
+
+expr_df <- as.data.frame(t(as.matrix(expr_matrix)))
+expr_df$pseudotime_normalized <- se@meta.data$pseudotime_normalized
+expr_df$condition <- se@meta.data$condition
+
+# Define pseudotime grid
+pseudo_grid <- seq(0, 1, length.out = 200)
+
+# Split expr_df by condition
+expr_cave    <- expr_df[expr_df$condition == "cave", ]
+expr_surface <- expr_df[expr_df$condition == "surface", ]
+
+model_genes <- names(attr(y0,"w.50"))
+```
+
+
+```{r,model genes' waves}
+# Run the smoother for pseudotime genes at once (genes x pseudotime matrix)
+
+smooth_pseudotime_surface <- signal_smooth(
+  logcounts  = t(as.matrix(expr_surface[,model_genes])),
+  pseudotime = expr_surface$pseudotime_normalized,
+  at         = pseudo_grid,
+  sd         = 0.075
+)
+
+smooth_pseudotime_cave <- signal_smooth(
+  logcounts  = t(as.matrix(expr_cave[,model_genes])),
+  pseudotime = expr_cave$pseudotime_normalized,
+  at         = pseudo_grid,
+  sd         = 0.075  # tune this — equivalent to span in LOESS
+)
+
+# smooth_cave and smooth_surface are genes x pseudotime matrices
+rownames(smooth_pseudotime_surface)    <- names(attr(y0,"w.50"))
+rownames(smooth_pseudotime_cave) <- names(attr(y0,"w.50"))
+
+saveRDS(smooth_pseudotime_surface,".../Ordinal_waves/SF_pseudotime_waves.RDS")
+saveRDS(smooth_pseudotime_cave,".../Ordinal_waves/CF_pseudotime_waves.RDS")
+```
+
+
+```{r}
+# Step 1: Cluster the genes
+hclust_result <- hclust(dist(smooth_pseudotime_surface))
+
+# Step 2: Cut into clusters (adjust k based on your data)
+gene_clusters <- cutree(hclust_result, k = 4)  # Adjust k as needed
+
+# Step 3: Calculate mean peak position for each cluster
+cluster_peak_order <- data.frame(
+  cluster = unique(gene_clusters)
+) %>%
+  rowwise() %>%
+  mutate(
+    genes_in_cluster = list(names(gene_clusters)[gene_clusters == cluster]),
+    mean_peak_bin = mean(apply(smooth_pseudotime_surface[genes_in_cluster, ], 1, which.max))
+  ) %>%
+  arrange(mean_peak_bin)
+
+# Step 4: Reorder gene clusters and create annotation
+gene_order_by_peak <- unlist(lapply(cluster_peak_order$cluster, function(cl) {
+  genes_in_cl <- names(gene_clusters)[gene_clusters == cl]
+  # Within each cluster, order by peak position
+  peak_positions <- apply(smooth_pseudotime_surface[genes_in_cl, ], 1, which.max)
+  genes_in_cl[order(peak_positions)]
+}))
+
+# Create row annotation for clusters
+row_annotation <- data.frame(
+  Cluster = factor(gene_clusters[gene_order_by_peak])
+)
+rownames(row_annotation) <- gene_order_by_peak
+
+# Step 5: Plot with gaps between clusters
+cluster_sizes <- table(gene_clusters[gene_order_by_peak])
+gap_positions <- cumsum(cluster_sizes)[-length(cluster_sizes)]
+
+library(pheatmap)
+p1 <- pheatmap(smooth_pseudotime_surface[gene_order_by_peak, ],
+               cluster_rows = FALSE,
+               cluster_cols = FALSE,
+               show_rownames = TRUE,
+               color = colorRampPalette(c("white", "darkblue"))(100),
+               main = "Gene expression waves across pseudotime SF",
+               annotation_row = row_annotation)
+
+p2 <- pheatmap(smooth_pseudotime_cave[gene_order_by_peak, ],
+               cluster_rows = FALSE,
+               cluster_cols = FALSE,
+               show_rownames = TRUE,
+               color = colorRampPalette(c("white", "firebrick"))(100),
+               main = "Gene expression waves across pseudotime CF",
+               annotation_row = row_annotation)
+
+ggsave(".../Ordinal_waves/pseudotime_genes_SF_waves.pdf", p1, width = 8, height = 10)
+ggsave(".../Ordinal_waves/pseudotime_genes_CF_waves.pdf", p2, width = 8, height = 10)
+```
+
+
+```{r, gene selection}
+# Filter genes that are expressed at least in a 10% of cells of 1 of the 2 conditions
+counts <- GetAssayData(se, layer = "data")
+
+cave_cells    <- se$condition == "cave"
+surface_cells <- se$condition == "surface"
+
+frac_cave    <- rowSums(counts[, cave_cells] > 0) / sum(cave_cells)
+frac_surface <- rowSums(counts[, surface_cells] > 0) / sum(surface_cells)
+
+genes_keep <- rownames(counts)[frac_cave >= 0.10 | frac_surface >= 0.10]
+table(genes_keep%in%rownames(se))
+```
+
+```{r, calculate all gene waves}
+# Run the smoother for all genes at once (genes x pseudotime matrix)
+smooth_cave <- signal_smooth(
+  logcounts  = t(as.matrix(expr_cave[, genes_keep])),
+  pseudotime = expr_cave$pseudotime_normalized,
+  at         = pseudo_grid,
+  sd         = 0.075  # tune this — equivalent to span in LOESS
+)
+
+smooth_surface <- signal_smooth(
+  logcounts  = t(as.matrix(expr_surface[, genes_keep])),
+  pseudotime = expr_surface$pseudotime_normalized,
+  at         = pseudo_grid,
+  sd         = 0.075
+)
+```
+
+```{r, calculate all gene waves}
+# Step 1: variability filter
+surface_range <- apply(smooth_surface, 1, \(x) diff(range(x)))
+cave_range    <- apply(smooth_cave,    1, \(x) diff(range(x)))
+
+pass_variability <- surface_range > 0.5 | cave_range > 0.5
+removed_variability <- rownames(smooth_surface)[!pass_variability]
+cat("genes removed by low variability:", length(removed_variability), "\n")
+
+smooth_surface_filtered <- smooth_surface[pass_variability, ]
+smooth_cave_filtered    <- smooth_cave[pass_variability, ]
+
+# Step 2: DEG filter on remaining genes
+surface_range  <- apply(smooth_surface_filtered, 1, \(x) diff(range(x)))
+mean_diff_norm <- abs(rowMeans(smooth_cave_filtered) - rowMeans(smooth_surface_filtered)) / surface_range
+
+threshold_mean_diff_norm <- quantile(mean_diff_norm, 0.90)
+pass_deg     <- mean_diff_norm <= threshold_mean_diff_norm
+removed_deg  <- names(mean_diff_norm)[!pass_deg]
+cat("genes removed by DEG filter:", length(removed_deg), "\n")
+
+smooth_surface_filtered_2 <- smooth_surface_filtered[pass_deg, ]
+smooth_cave_filtered_2    <- smooth_cave_filtered[pass_deg, ]
+
+cat("genes kept:", nrow(smooth_surface_filtered_2), "\n")
+cat("90th percentile threshold:", round(threshold_mean_diff_norm, 3), "\n")
+```
+
+
+```{r, classify wave types}
+# Combine matrices, tagging by morph
+combined <- rbind(
+  smooth_surface_filtered_2 |> as_tibble(rownames = "symbol") |> mutate(morph = "surface"),
+  smooth_cave_filtered_2    |> as_tibble(rownames = "symbol") |> mutate(morph = "cave")
+)
+
+# Run UMAP on the expression columns only
+M_combined <- combined |> select(starts_with("V")) |> as.matrix()
+umap_coords <- uwot::umap(M_combined, metric = "correlation")
+
+# Add UMAP coordinates back
+combined <- combined |>
+  mutate(UMAP1 = umap_coords[, 1],
+         UMAP2 = umap_coords[, 2])
+
+ggplot(combined,aes(UMAP1,UMAP2,col=morph))+
+  geom_point(stroke=NA,size=1.5)+
+  coord_equal()+
+  theme_minimal()
+
+length(unique(combined$symbol))
+
+combined$cluster <- bluster::clusterRows(
+  umap_coords,
+  bluster::NNGraphParam(k = 40, cluster.fun = "louvain", cluster.args = list(resolution = 2))
+)
+
+table(combined$cluster)
+
+cluster_centers <- combined |>
+  group_by(cluster) |>
+  summarise(UMAP1 = mean(UMAP1), UMAP2 = mean(UMAP2))
+
+ggplot(combined, aes(UMAP1, UMAP2, col = cluster)) +
+  geom_point(stroke = NA, size = 1.5) +
+  geom_label(data = cluster_centers, aes(label = cluster),
+             color = "black", size = 3, alpha = 0.7) +
+  coord_equal() +
+  theme_minimal()
+
+ggplot(combined, aes(UMAP1, UMAP2, col = cluster)) +
+  geom_point(stroke = NA, size = 1.5) +
+  geom_point(data = \(x) filter(x, symbol == "cadm3"),
+             color = "black", size = 3, stroke = 1, shape = 21,
+             aes(fill = cluster)) +
+  ggrepel::geom_text_repel(data = \(x) filter(x, symbol == "cadm3"),
+                            aes(label = symbol),
+                            color = "black", size = 3, box.padding = 0.5) +
+  geom_label(data = cluster_centers, aes(label = cluster),
+             color = "black", size = 3, alpha = 0.7) +
+  coord_equal() +
+  theme_minimal()
+
+combined |>
+  group_by(cluster) |>
+  summarise(across(starts_with("V"), mean)) |>
+  pivot_longer(starts_with("V"), names_to = "t", values_to = "expr") |>
+  mutate(t = as.integer(str_remove(t, "V"))) |>
+  ggplot(aes(x = t, y = expr, color = cluster)) +
+  geom_line() +
+  ylim(c(0,2))+
+  facet_wrap(~cluster) +
+  theme_classic() +
+  labs(x = "Pseudotime", y = "Mean expression")
+```
+
+```{r, classify wave types}
+# The classification must be adjusted according to the overall shape of the curve for each cluster
+combined$wave_type <- "NA"
+combined$wave_type[combined$cluster%in%c(3,6,7,13,15,17)] <- "transient_activated"
+combined$wave_type[combined$cluster%in%c(12)] <- "transient_repressed"
+combined$wave_type[combined$cluster%in%c(2,5,8,9,10,14)] <- "activated"
+combined$wave_type[combined$cluster%in%c(1,4,11,16)] <- "repressed"
+
+ggplot(combined,aes(UMAP1,UMAP2,col=wave_type))+
+  geom_point(stroke=NA,size=1.5)+
+  coord_equal()+
+  theme_minimal()
+
+ggsave(".../Ordinal_waves/umap_by_wavetype.pdf", width = 8, height = 5)
+
+combined |>
+  group_by(wave_type, morph) |>
+  summarise(across(starts_with("V"), mean), .groups = "drop") |>
+  pivot_longer(starts_with("V"), names_to = "t", values_to = "expr") |>
+  mutate(t = as.integer(sub("V", "", t))) |>
+  ggplot(aes(x = t, y = expr, color = wave_type)) +
+  geom_line(
+    data = combined |>
+      pivot_longer(starts_with("V"), names_to = "t", values_to = "expr") |>
+      mutate(t = as.integer(sub("V", "", t))),
+    aes(group = interaction(symbol, morph)),
+    alpha = 0.35, linewidth = 0.1
+  ) +
+  geom_line(linewidth = 1) +
+  facet_grid(morph ~ wave_type) +
+  theme_classic() +
+  labs(x = "Pseudotime", y = "Mean expression")
+
+ggsave(".../Ordinal_waves/Wave_type_by_morph.pdf", width = 8, height = 5)
+
+table(combined$wave_type)
+
+library(patchwork)
+
+wave_conservation <- combined |>
+  select(symbol, morph, wave_type) |>
+  pivot_wider(names_from = morph, values_from = wave_type,
+              names_prefix = "wave_type_", values_fn = \(x) x[1]) |>
+  drop_na() |>
+  mutate(conserved = ifelse(wave_type_surface == wave_type_cave, "conserved", "divergent")) |>
+  dplyr::count(wave_type_surface, conserved)
+
+p_sankey <- combined |>
+  select(symbol, morph, wave_type) |>
+  pivot_wider(names_from = morph, values_from = wave_type,
+              names_prefix = "wave_type_", values_fn = \(x) x[1]) |>
+  drop_na() |>
+  dplyr::count(wave_type_surface, wave_type_cave) |>
+  ggplot(aes(axis1 = wave_type_surface, axis2 = wave_type_cave, y = n)) +
+  geom_alluvium(aes(fill = wave_type_surface), alpha = 0.7, curve_type = "sigmoid") +
+  geom_stratum(width = 0.3, fill = "white", color = "gray40") +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), size = 3.5) +
+  scale_x_discrete(limits = c("Surface", "Cave"), expand = c(0.1, 0.1)) +
+  scale_fill_manual(values = c(activated = "#E07B54", repressed = "#5B8DB8", transient = "#6DBF82")) +
+  theme_minimal() +
+  labs(y = "Number of genes", fill = "Wave type") +
+  theme(legend.position = "none")
+
+p_pie <- ggplot(wave_conservation, aes(x = "", y = n, fill = conserved)) +
+  geom_col(width = 1, position = "fill") +
+  coord_polar(theta = "y") +
+  facet_wrap(~wave_type_surface) +
+  scale_fill_manual(values = c(conserved = "#B4B2A9", divergent = "#444441")) +
+  theme_void() +
+  labs(fill = NULL) +
+  geom_text(aes(label = paste0(round(n / ave(n, wave_type_surface, FUN = sum) * 100, 1), "%")),
+            position = position_fill(vjust = 0.5), color = "white", size = 3.5) +
+  theme(strip.text = element_text(size = 9))
+
+p_sankey + p_pie + plot_layout(widths = c(3, 1))
+
+ggsave(".../Ordinal_waves/sankey_plot.pdf", width = 12, height = 8)
+
+saveRDS(combined,".../Ordinal_waves/waves_se_astyanax.RDS")
+```
+
+```{r, HH function}
+compute_halfheight_combined <- function(combined, window_frac = 0.5, sustain_threshold = 0.4, cor_threshold = 0.75) {
+  
+  wave_cols <- grep("^V", colnames(combined), value = TRUE)
+  n <- length(wave_cols)
+  window_size <- round(n * window_frac)
+  
+  genes <- unique(combined$symbol)
+  
+  t(sapply(genes, function(g) {
+    tryCatch({
+      
+    s_cave    <- pmax(as.numeric(combined[combined$symbol == g & combined$morph == "cave",    wave_cols]), 0)
+    s_surface <- pmax(as.numeric(combined[combined$symbol == g & combined$morph == "surface", wave_cols]), 0)
+    
+    variations <- sapply(1:(n - window_size), function(i) {
+      diff(range(s_surface[i:(i + window_size)]))
+    })
+    
+    best_start <- which.max(variations)
+    best_end   <- best_start + window_size
+    window_idx <- best_start:best_end
+    
+    surface_window     <- s_surface[window_idx]
+    win_len            <- length(surface_window)
+    peak_idx_surface   <- which.max(surface_window)
+    trough_idx_surface <- which.min(surface_window)
+    is_biphasic_surface <- (peak_idx_surface  > 1 & peak_idx_surface  < win_len) |
+                           (trough_idx_surface > 1 & trough_idx_surface < win_len)
+    
+    peak_idx_cave   <- which.max(s_cave[window_idx])
+    trough_idx_cave <- which.min(s_cave[window_idx])
+    is_biphasic_cave <- (peak_idx_cave  > 1 & peak_idx_cave  < win_len) |
+                        (trough_idx_cave > 1 & trough_idx_cave < win_len)
+    
+    if (is_biphasic_surface) {
+      pos_var <- max(surface_window) - surface_window[1]
+      neg_var <- surface_window[1] - min(surface_window)
+      if (pos_var >= neg_var) {
+        slope_direction    <- "ascending"
+        anchor_idx_surface <- peak_idx_surface
+      } else {
+        slope_direction    <- "descending"
+        anchor_idx_surface <- trough_idx_surface
+      }
+    } else {
+      net_var <- surface_window[win_len] - surface_window[1]
+      if (net_var >= 0) {
+        slope_direction    <- "ascending"
+        anchor_idx_surface <- peak_idx_surface
+      } else {
+        slope_direction    <- "descending"
+        anchor_idx_surface <- trough_idx_surface
+      }
+    }
+    
+    if (slope_direction == "ascending") {
+      surface_min_w <- min(surface_window[1:anchor_idx_surface])
+      surface_max_w <- surface_window[anchor_idx_surface]
+    } else {
+      surface_max_w <- max(surface_window[1:anchor_idx_surface])
+      surface_min_w <- surface_window[anchor_idx_surface]
+    }
+    amplitude   <- surface_max_w - surface_min_w
+    half_height <- surface_min_w + amplitude / 2
+    
+    wave_cor <- cor(s_cave, s_surface)
+    
+    check_sustain <- function(s, crossing_idx) {
+      post <- s[crossing_idx:n]
+      if (slope_direction == "ascending") {
+        sum(post >= half_height) / length(post) >= sustain_threshold
+      } else {
+        sum(post <= half_height) / length(post) >= sustain_threshold
+      }
+    }
+    
+    get_crossing <- function(s, other_crossing = NULL) {
+      s_window <- s[window_idx]
+      
+      anchor <- if (slope_direction == "ascending") which.min(s_window) else which.max(s_window)
+      s_window_anchored <- s_window[anchor:win_len]
+      
+      if (slope_direction == "descending") {
+        idx_anchored <- which(s_window_anchored[-length(s_window_anchored)] > half_height & 
+                              s_window_anchored[-1] <= half_height)[1]
+      } else {
+        idx_anchored <- which(s_window_anchored[-length(s_window_anchored)] < half_height & 
+                              s_window_anchored[-1] >= half_height)[1]
+      }
+      
+      idx <- if (!is.na(idx_anchored)) idx_anchored + anchor - 1 else NA
+      
+      if (is.na(idx)) {
+        if (slope_direction == "ascending") {
+          all_crossings <- which(s[-n] < half_height & s[-1] >= half_height)
+        } else {
+          all_crossings <- which(s[-n] > half_height & s[-1] <= half_height)
+        }
+        if (length(all_crossings) == 0) {
+          list(value = 0, method = "HH not reached")
+        } else {
+          if (!is.null(other_crossing) && !is.na(other_crossing) && other_crossing > 0) {
+            ref     <- which.min(abs(pseudo_grid - other_crossing))
+            closest <- all_crossings[which.min(abs(all_crossings - ref))]
+          } else {
+            ref     <- ifelse(all_crossings[1] < window_idx[1],
+                              window_idx[1],
+                              window_idx[length(window_idx)])
+            closest <- all_crossings[which.min(abs(all_crossings - ref))]
+          }
+          if (!check_sustain(s, closest)) {
+            list(value = 0, method = "HH not reached")
+          } else {
+            list(value = pseudo_grid[closest], method = "hh_full_range")
+          }
+        }
+      } else {
+        actual_idx <- window_idx[idx]
+        if (!check_sustain(s, actual_idx)) {
+          list(value = 0, method = "HH not reached")
+        } else {
+          list(value = pseudo_grid[actual_idx], method = "hh")
+        }
+      }
+    }
+    
+    surface_cross <- get_crossing(s_surface)
+    
+    cave_can_cross <- max(s_cave) >= half_height & min(s_cave) <= half_height
+    
+    if (!cave_can_cross) {
+      cave_cross <- list(value = 0, method = "HH not reached")
+      
+    } else if (wave_cor >= cor_threshold) {
+      cave_cross <- get_crossing(s_cave, other_crossing = surface_cross$value)
+      if (slope_direction == "ascending" && s_cave[window_idx[1]] >= half_height) {
+        cave_cross <- list(value = 0, method = "HH not reached")
+      } else if (slope_direction == "descending" && s_cave[window_idx[1]] <= half_height) {
+        cave_cross <- list(value = 0, method = "HH not reached")
+      }
+      
+    } else {
+      if (slope_direction == "ascending") {
+        all_crossings <- which(s_cave[-n] < half_height & s_cave[-1] >= half_height)
+      } else {
+        all_crossings <- which(s_cave[-n] > half_height & s_cave[-1] <= half_height)
+      }
+      if (length(all_crossings) == 0) {
+        cave_cross <- list(value = 0, method = "HH not reached")
+      } else {
+        ref     <- which.min(abs(pseudo_grid - surface_cross$value))
+        closest <- all_crossings[which.min(abs(all_crossings - ref))]
+        if (!check_sustain(s_cave, closest)) {
+          cave_cross <- list(value = 0, method = "HH not reached")
+        } else {
+          cave_cross <- list(value = pseudo_grid[closest], method = "hh_full_range")
+        }
+      }
+    }
+    
+    c(
+      global_max                     = max(c(s_cave[window_idx], s_surface[window_idx]), na.rm = TRUE),
+      global_min                     = min(c(s_cave[window_idx], s_surface[window_idx]), na.rm = TRUE),
+      amplitude                      = amplitude,
+      cave_max                       = max(s_cave),
+      surface_max                    = max(s_surface),
+      half_height                    = half_height,
+      wave_cor                       = wave_cor,
+      window_start                   = pseudo_grid[best_start],
+      window_end                     = pseudo_grid[best_end],
+      window_start_idx               = best_start,
+      window_end_idx                 = best_end,
+      cave_pseudotime_half_height    = cave_cross$value,
+      surface_pseudotime_half_height = surface_cross$value,
+      cave_method                    = cave_cross$method,
+      surface_method                 = surface_cross$method,
+      biphasic_cave                  = as.integer(is_biphasic_cave),
+      biphasic_surface               = as.integer(is_biphasic_surface),
+      biphasic_type                  = case_when(
+        is_biphasic_cave & is_biphasic_surface ~ "both",
+        is_biphasic_cave                       ~ "cave only",
+        is_biphasic_surface                    ~ "surface only",
+        TRUE                                   ~ "none"
+      )
+    )
+    
+    }, error = function(e) {
+      cat("ERROR in gene:", g, "\n")
+      cat("Message:", e$message, "\n")
+      rep(NA, 19)
+    })
+  }))
+}
+```
+
+```{r, compute HH analysis for combined waves}
+compute_halfheight_combined <- function(combined, window_frac = 0.5, sustain_threshold = 0.4, cor_threshold = 0.75) {
+  
+  wave_cols <- grep("^V", colnames(combined), value = TRUE)
+  n <- length(wave_cols)
+  window_size <- round(n * window_frac)
+  
+  genes <- unique(combined$symbol)
+  
+  t(sapply(genes, function(g) {
+    tryCatch({
+      
+    s_cave    <- pmax(as.numeric(combined[combined$symbol == g & combined$morph == "cave",    wave_cols]), 0)
+    s_surface <- pmax(as.numeric(combined[combined$symbol == g & combined$morph == "surface", wave_cols]), 0)
+    
+    variations <- sapply(1:(n - window_size), function(i) {
+      diff(range(s_surface[i:(i + window_size)]))
+    })
+    
+    best_start <- which.max(variations)
+    best_end   <- best_start + window_size
+    window_idx <- best_start:best_end
+    
+    surface_window     <- s_surface[window_idx]
+    win_len            <- length(surface_window)
+    peak_idx_surface   <- which.max(surface_window)
+    trough_idx_surface <- which.min(surface_window)
+    is_biphasic_surface <- (peak_idx_surface  > 1 & peak_idx_surface  < win_len) |
+                           (trough_idx_surface > 1 & trough_idx_surface < win_len)
+    
+    peak_idx_cave   <- which.max(s_cave[window_idx])
+    trough_idx_cave <- which.min(s_cave[window_idx])
+    is_biphasic_cave <- (peak_idx_cave  > 1 & peak_idx_cave  < win_len) |
+                        (trough_idx_cave > 1 & trough_idx_cave < win_len)
+    
+    if (is_biphasic_surface) {
+      pos_var <- max(surface_window) - surface_window[1]
+      neg_var <- surface_window[1] - min(surface_window)
+      if (pos_var >= neg_var) {
+        slope_direction    <- "ascending"
+        anchor_idx_surface <- peak_idx_surface
+      } else {
+        slope_direction    <- "descending"
+        anchor_idx_surface <- trough_idx_surface
+      }
+    } else {
+      net_var <- surface_window[win_len] - surface_window[1]
+      if (net_var >= 0) {
+        slope_direction    <- "ascending"
+        anchor_idx_surface <- peak_idx_surface
+      } else {
+        slope_direction    <- "descending"
+        anchor_idx_surface <- trough_idx_surface
+      }
+    }
+    
+    if (slope_direction == "ascending") {
+      surface_min_w <- min(surface_window[1:anchor_idx_surface])
+      surface_max_w <- surface_window[anchor_idx_surface]
+    } else {
+      surface_max_w <- max(surface_window[1:anchor_idx_surface])
+      surface_min_w <- surface_window[anchor_idx_surface]
+    }
+    amplitude   <- surface_max_w - surface_min_w
+    half_height <- surface_min_w + amplitude / 2
+    
+    wave_cor <- cor(s_cave, s_surface)
+    
+    check_sustain <- function(s, crossing_idx) {
+      post <- s[crossing_idx:n]
+      if (slope_direction == "ascending") {
+        sum(post >= half_height) / length(post) >= sustain_threshold
+      } else {
+        sum(post <= half_height) / length(post) >= sustain_threshold
+      }
+    }
+    
+    get_crossing <- function(s, other_crossing = NULL) {
+      s_window <- s[window_idx]
+      
+      anchor <- if (slope_direction == "ascending") which.min(s_window) else which.max(s_window)
+      s_window_anchored <- s_window[anchor:win_len]
+      
+      if (slope_direction == "descending") {
+        idx_anchored <- which(s_window_anchored[-length(s_window_anchored)] > half_height & 
+                              s_window_anchored[-1] <= half_height)[1]
+      } else {
+        idx_anchored <- which(s_window_anchored[-length(s_window_anchored)] < half_height & 
+                              s_window_anchored[-1] >= half_height)[1]
+      }
+      
+      idx <- if (!is.na(idx_anchored)) idx_anchored + anchor - 1 else NA
+      
+      if (is.na(idx)) {
+        if (slope_direction == "ascending") {
+          all_crossings <- which(s[-n] < half_height & s[-1] >= half_height)
+        } else {
+          all_crossings <- which(s[-n] > half_height & s[-1] <= half_height)
+        }
+        if (length(all_crossings) == 0) {
+          list(value = 0, method = "HH not reached")
+        } else {
+          if (!is.null(other_crossing) && !is.na(other_crossing) && other_crossing > 0) {
+            ref     <- which.min(abs(pseudo_grid - other_crossing))
+            closest <- all_crossings[which.min(abs(all_crossings - ref))]
+          } else {
+            ref     <- ifelse(all_crossings[1] < window_idx[1],
+                              window_idx[1],
+                              window_idx[length(window_idx)])
+            closest <- all_crossings[which.min(abs(all_crossings - ref))]
+          }
+          if (!check_sustain(s, closest)) {
+            list(value = 0, method = "HH not reached")
+          } else {
+            list(value = pseudo_grid[closest], method = "hh_full_range")
+          }
+        }
+      } else {
+        actual_idx <- window_idx[idx]
+        if (!check_sustain(s, actual_idx)) {
+          list(value = 0, method = "HH not reached")
+        } else {
+          list(value = pseudo_grid[actual_idx], method = "hh")
+        }
+      }
+    }
+    
+    surface_cross <- get_crossing(s_surface)
+    
+    cave_can_cross <- max(s_cave) >= half_height & min(s_cave) <= half_height
+    
+    if (!cave_can_cross) {
+      cave_cross <- list(value = 0, method = "HH not reached")
+      
+    } else if (wave_cor >= cor_threshold) {
+      cave_cross <- get_crossing(s_cave, other_crossing = surface_cross$value)
+      if (slope_direction == "ascending" && s_cave[window_idx[1]] >= half_height) {
+        cave_cross <- list(value = 0, method = "HH not reached")
+      } else if (slope_direction == "descending" && s_cave[window_idx[1]] <= half_height) {
+        cave_cross <- list(value = 0, method = "HH not reached")
+      }
+      
+    } else {
+      if (slope_direction == "ascending") {
+        all_crossings <- which(s_cave[-n] < half_height & s_cave[-1] >= half_height)
+      } else {
+        all_crossings <- which(s_cave[-n] > half_height & s_cave[-1] <= half_height)
+      }
+      if (length(all_crossings) == 0) {
+        cave_cross <- list(value = 0, method = "HH not reached")
+      } else {
+        ref     <- which.min(abs(pseudo_grid - surface_cross$value))
+        closest <- all_crossings[which.min(abs(all_crossings - ref))]
+        if (!check_sustain(s_cave, closest)) {
+          cave_cross <- list(value = 0, method = "HH not reached")
+        } else {
+          cave_cross <- list(value = pseudo_grid[closest], method = "hh_full_range")
+        }
+      }
+    }
+    
+    c(
+      global_max                     = max(c(s_cave[window_idx], s_surface[window_idx]), na.rm = TRUE),
+      global_min                     = min(c(s_cave[window_idx], s_surface[window_idx]), na.rm = TRUE),
+      amplitude                      = amplitude,
+      cave_max                       = max(s_cave),
+      surface_max                    = max(s_surface),
+      half_height                    = half_height,
+      wave_cor                       = wave_cor,
+      window_start                   = pseudo_grid[best_start],
+      window_end                     = pseudo_grid[best_end],
+      window_start_idx               = best_start,
+      window_end_idx                 = best_end,
+      cave_pseudotime_half_height    = cave_cross$value,
+      surface_pseudotime_half_height = surface_cross$value,
+      cave_method                    = cave_cross$method,
+      surface_method                 = surface_cross$method,
+      biphasic_cave                  = as.integer(is_biphasic_cave),
+      biphasic_surface               = as.integer(is_biphasic_surface),
+      biphasic_type                  = case_when(
+        is_biphasic_cave & is_biphasic_surface ~ "both",
+        is_biphasic_cave                       ~ "cave only",
+        is_biphasic_surface                    ~ "surface only",
+        TRUE                                   ~ "none"
+      )
+    )
+    
+    }, error = function(e) {
+      cat("ERROR in gene:", g, "\n")
+      cat("Message:", e$message, "\n")
+      rep(NA, 19)
+    })
+  }))
+}
+
+# run HH
+hh <- compute_halfheight_combined(combined, window_frac = 0.5, sustain_threshold = 0.4, cor_threshold = 0.75)
+
+# build results_df with all filters applied → ready to use directly
+results_df <- as.data.frame(hh) |>
+  rownames_to_column("gene") |>
+  mutate(across(-c(gene, cave_method, surface_method, biphasic_type), as.numeric)) |>
+  left_join(
+    combined |>
+      select(symbol, morph, wave_type) |>
+      pivot_wider(names_from = morph, values_from = wave_type, values_fn = \(x) x[1]) |>
+      mutate(wave_transition = paste0(surface, "_to_", cave)) |>
+      select(symbol, wave_transition),
+    by = c("gene" = "symbol")
+  ) |>
+  mutate(
+    hh_not_reached  = cave_method == "HH not reached" | surface_method == "HH not reached",
+    far_from_window = cave_method == "hh_full_range" &
+                      (cave_pseudotime_half_height > window_end + 0.1 |
+                       cave_pseudotime_half_height < window_start - 0.1),
+    delta           = case_when(
+      hh_not_reached                                                              ~ NA_real_,
+      wave_cor < 0.5                                                              ~ NA_real_,
+      wave_transition %in% c("activated_to_repressed", "repressed_to_activated") ~ NA_real_,
+      far_from_window                                                             ~ NA_real_,
+      TRUE                                                                        ~ surface_pseudotime_half_height - cave_pseudotime_half_height
+    )
+  )
+
+results_df_valid <- results_df |> filter(!is.na(delta))
+
+n_early <- sum(results_df_valid$delta < -0.05)
+n_late  <- sum(results_df_valid$delta >  0.05)
+n_total <- nrow(results_df_valid)
+
+ggplot(results_df_valid, aes(x = delta)) +
+  geom_histogram(bins = 50, fill = "#1D9E75", color = NA) +
+  geom_vline(xintercept = 0,     linetype = "dashed", color = "gray40") +
+  geom_vline(xintercept = -0.05, linetype = "dotted", color = "gray60") +
+  geom_vline(xintercept =  0.05, linetype = "dotted", color = "gray60") +
+  annotate("text", x = min(results_df_valid$delta) + 0.01, y = Inf,
+           label = paste0("cave early\n", round(n_early / n_total * 100, 1), "%"),
+           hjust = 0, vjust = 1.5, size = 3.5, color = "gray30") +
+  annotate("text", x = max(results_df_valid$delta) - 0.01, y = Inf,
+           label = paste0("cave late\n", round(n_late / n_total * 100, 1), "%"),
+           hjust = 1, vjust = 1.5, size = 3.5, color = "gray30") +
+  theme_classic() +
+  labs(x = "Δ HH (surface - cave pseudotime)", y = "Number of genes")
+
+ggsave(".../Ordinal_waves/bar_plot_delta_HH.pdf", width = 8, height = 5, device = cairo_pdf)
+
+ggplot(results_df_valid, aes(x = cave_pseudotime_half_height, 
+                        y = surface_pseudotime_half_height)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  geom_density_2d(color = "steelblue", alpha = 0.6, linewidth = 0.4) +
+  geom_point(aes(color = global_max), alpha = 0.5, size = 1.5) +
+  scale_color_gradientn(colors = c("gray80", "orange", "red4"), name = "max expression") +
+  geom_text_repel(data = results_df_valid[results_df_valid$gene == "fabp7a", ],
+                  aes(label = gene), color = "black", size = 3.5) +
+  xlim(0, 1) + ylim(0, 1) +
+  labs(
+    x = "pseudotime at half-height (cave)",
+    y = "pseudotime at half-height (surface)",
+    title = "Half-height pseudotime shift between conditions"
+  ) +
+  theme_classic()
+
+ggsave(".../Ordinal_waves/HH_shift.pdf", width = 8, height = 8)
+
+```
+
+```{r, plot gene waves with the HH calculation}
+
+plot_gene_wave <- function(gene) {
+  df <- data.frame(
+    pseudotime = rep(pseudo_grid, 2),
+    expr       = c(smooth_cave[gene, ], smooth_surface[gene, ]),
+    condition  = rep(c("cave", "surface"), each = length(pseudo_grid))
+  )
+  
+  gene_row <- results_df[results_df$gene == gene, ]
+  
+  cave_linetype    <- ifelse(gene_row$cave_method    == "hh_full_range", "dashed", "dotted")
+  surface_linetype <- ifelse(gene_row$surface_method == "hh_full_range", "dashed", "dotted")
+  
+  ggplot(df, aes(x = pseudotime, y = expr, color = condition)) +
+    geom_line(linewidth = 0.8) +
+    geom_hline(yintercept = gene_row$half_height,
+               linetype = "dashed", color = "gray50") +
+    geom_vline(xintercept = gene_row$cave_pseudotime_half_height,
+               linetype = cave_linetype, color = "#E05A5A") +
+    geom_vline(xintercept = gene_row$surface_pseudotime_half_height,
+               linetype = surface_linetype, color = "#3AAFA9") +
+    scale_color_manual(values = c("cave" = "#E05A5A", "surface" = "#3AAFA9")) +
+    labs(x = "pseudotime", y = "expression", title = gene,
+         subtitle = paste0("cave: ", gene_row$cave_method, " | surface: ", gene_row$surface_method)) +
+    theme_classic()
+}
+plot_gene_wave("otx2a")
+
+```

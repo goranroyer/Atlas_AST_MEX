@@ -1,0 +1,269 @@
+---
+title: "Ordinal Regression Model for Pseudotime"
+author: "Goran Royer"
+date: "2026-09-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,dev="svg")
+```
+
+
+```{r Libraries, message=FALSE, warning=FALSE}
+
+library(Seurat)
+library(ggplot2)
+library(bmrm)
+library(tidysdm)
+
+```
+
+
+## Load Seurat object
+
+As you know, all the single cell sequencing information is stored in a Seurat object. It's a container, created from a count matrix, which holds both raw and processed data stored in different layers. All our functions require seurat objects as input.  
+
+```{r Load the data, echo=FALSE}
+
+dir.create(".../ORM_Pseudotime")
+
+# Load your single cell data
+se_object <- readRDS(file = "path_to_your_object.RDS")
+se$age_condition <- paste0(se$age,"_",se$condition)
+# age contains 8 stages from 6hpf to 36hpf for both conditions
+
+se$age_condition <- factor(se$age_condition,levels=c("6hpf_surface","6hpf_cave","8hpf_surface","8hpf_cave",
+                                                     "10hpf_surface","10hpf_cave","12hpf_surface","12hpf_cave",
+                                                    "15hpf_surface","15hpf_cave","18hpf_surface","18hpf_cave",
+                                                    "24hpf_surface","24hpf_cave","36hpf_surface","36hpf_cave"))
+# To be adapted to requirements
+```
+
+
+## Useful functions
+
+```{r Functions, echo = FALSE}
+
+# In case you work without having processed the data beforehand or subset a group of cells (e.g a tissue, a cluster, ...)
+# Perform the Seurat pipeline
+process_seurat <- function(object,
+                           nfeatures = 2000,
+                           dims = 1:15,
+                           resolution = 0.8,
+                           verbose = TRUE) {
+  # Normalize
+  if (verbose) cat("Step 1/7: Normalizing data...\n")
+  seurat_object <- NormalizeData(seurat_object, 
+                                 normalization.method = "LogNormalize", 
+                                 scale.factor = 10000,
+                                 verbose = FALSE)
+  
+  # Find Variable Features
+  if (verbose) cat("Step 2/7: Finding variable features...\n")
+  seurat_object <- FindVariableFeatures(seurat_object, 
+                                        selection.method = "vst", 
+                                        nfeatures = nfeatures,
+                                        verbose = FALSE)
+  
+  # Scale Data
+  if (verbose) cat("Step 3/7: Scaling data...\n")
+  seurat_object <- ScaleData(seurat_object, 
+                             vars.to.regress = c("nCount_RNA", "nFeature_RNA"), 
+                             verbose = FALSE)
+  
+  # Run PCA
+  if (verbose) cat("Step 4/7: Running PCA...\n")
+  seurat_object <- RunPCA(seurat_object, 
+                          features = VariableFeatures(object = seurat_object),
+                          verbose = FALSE)
+  
+  # Find Neighbors
+  if (verbose) cat("Step 5/7: Finding neighbors...\n")
+  seurat_object <- FindNeighbors(seurat_object, 
+                                 dims = dims,
+                                 reduction = "pca",
+                                 verbose = FALSE)
+  
+  # Find Clusters
+  if (verbose) cat("Step 6/7: Finding clusters...\n")
+  seurat_object <- FindClusters(seurat_object, 
+                                resolution = resolution,
+                                verbose = FALSE)
+  
+  # Run UMAP
+  if (verbose) cat("Step 7/7: Running UMAP...\n")
+  seurat_object <- RunUMAP(seurat_object,
+                           dims = dims,
+                           reduction = "pca",
+                           verbose = FALSE)
+  
+  if (verbose) {
+    cat("\n=== PROCESSING COMPLETE ===\n")
+    cat("Cells:", ncol(seurat_object), "\n")
+    cat("Genes:", nrow(seurat_object), "\n")
+    cat("Variable features:", length(VariableFeatures(seurat_object)), "\n")
+    cat("Clusters:", length(unique(Idents(seurat_object))), "\n\n")
+  }
+  
+  return(seurat_object)
+}
+
+ordModel <- function(X,y,...) {
+  C <- costMatrix(y)
+  C <- C / tabulate(y)[col(C)] / tabulate(y)
+  C <- C/max(C)
+  C[sub(".*_","",colnames(C))[col(C)] != sub(".*_","",rownames(C))[row(C)]] <- 0
+  print(C)
+  ordinalRegressionLoss(X,y,C=C)
+}
+
+feature.selected.logistic <- function(x.trn,y.trn,x.tst=x.trn,n=25,keep=NULL,LAMBDA,cv_genelist=NULL,...) {
+  if (is.null(cv_genelist)) {
+    # x.trn <- x.trn+1
+    x.trn.norm <- x.trn
+    # x.trn.norm <- log2((x.trn/rowSums(x.trn))+1)
+    # x.trn.norm <- x.trn/rowSums(x.trn)/1e4
+    # x.trn.norm <- log2(x.trn.norm+1e9)
+    w <- nrbm(ordModel(x.trn.norm,y.trn),LAMBDA=LAMBDA)
+    dir.create("Models")
+    saveRDS(w, file="Models/General_model.rds")
+    rk <- pmin(rank(+w,ties.method="first"),rank(-w,ties.method="first"))
+    rk[colnames(x.trn) %in% keep] <- 0
+    names(w) <- colnames(x.trn)
+    
+    for(ng in n){
+      print(ng)
+      x.trn.reduced <- x.trn[,rk<=ng]
+      # x.trn.reduced <- x.trn.reduced+1
+      # x.trn.reduced.norm <- log2((x.trn.reduced/rowSums(x.trn.reduced))+1)
+      x.trn.reduced.norm <- x.trn.reduced
+      
+      w.reduced <- nrbm(ordModel(x.trn.reduced.norm,y.trn),LAMBDA=LAMBDA*ng/ncol(x)*10)
+      names(w.reduced) <- colnames(x.trn.reduced)
+      
+      saveRDS(w.reduced, file=paste0("Models/Pruned_model_",ng,"_genes.rds"))
+      
+      x.tst.reduced <- x.tst[,rk<=ng]
+      # x.tst.reduced <- x.tst.reduced+1
+      # x.tst.reduced.norm <- log2(x.tst.reduced/rowSums(x.tst.reduced))
+      x.tst.reduced.norm <- x.tst.reduced
+      if(ng==n[1]){
+        p <- predict(w.reduced,x.tst.reduced.norm)
+      }
+      attr(p,paste0("w.",ng)) <- w.reduced
+      attr(p,paste0("pred.",ng)) <- as.vector(predict(w.reduced,x.tst.reduced.norm))
+    }
+    attr(p,"w.global") <- w
+    
+  }else{
+    for(gen in cv_genelist){
+      ngen=length(gen)/2
+      x.trn.reduced <- x.trn[,gen]
+      # x.trn.reduced <- x.trn.reduced+1
+      # x.trn.reduced.norm <- log2(x.trn.reduced/rowSums(x.trn.reduced))
+      x.trn.reduced.norm  <- x.trn.reduced
+      w.reduced <- nrbm(ordModel(x.trn.reduced.norm,y.trn),LAMBDA=LAMBDA*ngen/ncol(x)*10)
+      names(w.reduced) <- colnames(x.trn.reduced)
+      
+      x.tst.reduced <- x.tst[,gen]
+      # x.tst.reduced <- x.tst.reduced+1
+      # x.tst.reduced.norm <- log2(x.tst.reduced/rowSums(x.tst.reduced))
+      x.tst.reduced.norm <- x.tst.reduced
+      if(setequal(gen, genelist[[1]])){
+        p <- predict(w.reduced,x.tst.reduced.norm)
+      }
+      attr(p,paste0("w.",ngen)) <- w.reduced
+      attr(p,paste0("pred.",ngen)) <- as.vector(predict(w.reduced,x.tst.reduced.norm))
+    }
+  }
+  p
+}
+```
+
+
+```{r Definition of training cells and parameters}
+
+x <- t(as.matrix(se@assays$RNA@data))
+x <- cbind(intepseudotimeept=1000,x)
+y <- factor(se$age_condition,levels=c("10hpf_surface","10hpf_cave","12hpf_surface","12hpf_cave",
+                                                    "15hpf_surface","15hpf_cave","18hpf_surface","18hpf_cave",
+                                                    "24hpf_surface","24hpf_cave","36hpf_surface","36hpf_cave"))
+names(y) <- colnames(se)
+
+LAMBDA <- 0.05
+# list of ngenes to test (knowing that 50 is 100 genes total )
+ngenes <- c(25,50,75,100,150,200,300)
+
+```
+
+
+```{r Train General model}
+
+y0 <- feature.selected.logistic(x,y,LAMBDA=LAMBDA,n=ngenes)
+plot(sort(attr(y0,"w.100")))
+
+saveRDS(y0, ".../ORM_Pseudotime/Model_pseudotime_ngenes_cells_subset.RDS")
+# y0 is a matrix of penalty values, obtained using ordinal regression, for each gene in the model 
+```
+
+
+The CrossValidation is used to determine the efficency of the model. In order to do this, a part of the dataset, let's say 10% of the cells, is excluded and the model is trained on the 90% remaining cells. This model, trained on the same conditions, is used to predict the 10% of cells excluded. This technique is used because it is wrong to evaluate the predictive ability of a model on a set of cells used for the training. For the crossvalidation we keep the genes selected by the model before.
+
+```{r Crossvalidation}
+
+genelist <- lapply(ngenes, function(i) names(attr(y0, paste0("w.",i))))
+
+set.seed(333)
+
+folds <- balanced.cv.fold(y,10)
+
+p <- lapply(levels(folds),function(g) {
+  print(g)
+  trn <- x[folds!=g,]
+  y1 <- feature.selected.logistic(trn,y[folds!=g],x,LAMBDA=LAMBDA,cv_genelist = genelist)
+  p1 <- lapply(ngenes, function(i){
+    as.vector(attr(y1, paste0("pred.",i)))
+  })
+  p1 <- do.call(cbind,p1)
+  colnames(p1) <- paste0(ngenes,"_genes")
+  p1[folds!=g,] <- NA
+  p1
+})
+
+p2 <- lapply(ngenes, function(i){
+  n <- lapply(p, function(j) j[,paste0(i,"_genes")])
+  n <- simplify2array(n)
+  n <- rowMeans(n,na.rm=TRUE)
+})
+
+p2 <- simplify2array(p2)
+colnames(p2) <- paste0("cv_",ngenes,"_genes")
+
+# transfer the crossvalidation values of the training to the object
+cv2 <- p2[match(rownames(se@meta.data),names(y)),,drop=FALSE]
+
+se <- AddMetaData(se,cv2)
+```
+
+
+Remember to change the cv of interest depending on the optimal chosen genes. If you observe a plateau in a values, take the lowest number of genes (if 300 and 2000 have the same value, take the 300), it will reduce noise in the prediction and improve prediction values.
+
+```{r Plot crossvalidation values for trained cells}
+
+se$pseudotime_normalized <- (se$cv_50_genes - min(se$cv_50_genes)) / (max(se$cv_50_genes) - min(se$cv_50_genes))
+
+ggplot(se@meta.data, aes(pseudotime_normalized,col=age, fill=age))+
+  geom_density(alpha=0.5)+
+  theme_bw()+
+  facet_wrap(~condition, ncol = 1)+
+  ggtitle("Cross Validation of training cells")
+ggsave(".../ORM_Pseudotime/pseudotime_density_50genes.pdf",width=8, height=5)
+
+ggplot(se@meta.data,aes(pseudotime_normalized,age,col=condition))+geom_violin()
+ggsave(".../ORM_Pseudotime/pseudotime_violin_50genes.pdf",width=8, height=5)
+
+saveRDS(se, ".../ORM_Pseudotime/obj_predicted.RDS")
+
+```
+

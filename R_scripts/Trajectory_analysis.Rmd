@@ -1,0 +1,265 @@
+---
+title: "Trajectory_analysis"
+author: "Goran Royer"
+date: "2026-09-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setup, include = FALSE}
+packages <- c("Seurat", "URD", "ggplot2", "patchwork")
+invisible(lapply(packages, library, character.only = TRUE))
+rm(list = ls())
+gc()
+```
+
+```{r Function and folders}
+source("Script_utility/seuratToURD.R")
+dir.create(".../Trajectories")
+dir.create(".../Trajectories/Plots")
+```
+
+```{r Dataset Loading}
+se <- readRDS(".../seurat_object.RDS")
+
+# We split the data in two subset corresponding to the two morphotypes for the rest of this analysis
+se.sf <- subset(se,condition%in%"surface")
+se.cf <- subset(se,condition%in%"cave")
+
+# Conversion to URD objects
+sf <- seuratV5ToURD(se.sf)
+cf <- seuratV5ToURD(se.cf)
+```
+
+
+## Diffusion Map
+
+```{R Diffusion Map}
+## When choosing the KNN, start with the square root of the total number of cells  
+
+# For SURFACE
+sf <- calcDM(sf, knn = 70, sigma = 13, verbose=T)
+dmsf <- plotDimArray(sf, reduction.use = "dm", dims.to.plot = 1:10, label = "age",
+              outer.title = "knn = 70, sigma = 13 - Surface")
+ggsave(".../URD/Plots/DM_SF.pdf",dmsf, width=10, height=7)
+
+# For CAVE
+cf <- calcDM(cf, knn = 70, sigma = 13, verbose = T)
+dmcf<- plotDimArray(cf, reduction.use = "dm", dims.to.plot = 1:10, label = "age",
+             outer.title = "knn = 70, sigma = 13 - Cave")
+ggsave(".../URD/Plots/DM_CF.pdf", dmcf, width=10, height=7)
+
+```
+
+
+## Pseudotime
+
+Calculating the pseudotime is important for the rest of the analysis. As we do not calculate the pseudotime via URD, it is essential to transfer the pseudotime via ORM (see the “Pseudotime_calculation” script).
+
+```{R Pseudotime}
+#For SF ----
+sf@pseudotime[,"pseudotime"] <- sf@meta$pseudotime_normalized
+
+diffusion.logistic_sf <- pseudotimeDetermineLogistic(sf, "pseudotime",
+                                                  optimal.cells.forward = 40, 
+                                                  max.cells.back = 80, 
+                                                  pseudotime.direction = "<", 
+                                                  do.plot = T, 
+                                                  print.values = T)
+
+biased.tm_sf <- pseudotimeWeightTransitionMatrix(sf, 
+                                              pseudotime = "pseudotime", 
+                                              logistic.params = diffusion.logistic_sf, 
+                                              pseudotime.direction = "<")
+
+#For CF ----
+cf@pseudotime[,"pseudotime"] <- cf@meta$pseudotime_normalized
+
+diffusion.logistic_cf <- pseudotimeDetermineLogistic(cf, "pseudotime",
+                                                  optimal.cells.forward = 40, 
+                                                  max.cells.back = 80, 
+                                                  pseudotime.direction = "<", 
+                                                  do.plot = T, 
+                                                  print.values = T)
+
+biased.tm_cf <- pseudotimeWeightTransitionMatrix(cf, 
+                                              pseudotime = "pseudotime", 
+                                              logistic.params = diffusion.logistic_cf, 
+                                              pseudotime.direction = "<")
+
+```
+
+
+## Define root and tips
+
+```{R Root}
+#SF
+root_sf <- rownames(sf@meta[sf@meta$age == "6hpf", ])
+
+#CF
+root_cf <- rownames(cf@meta[cf@meta$age == "6hpf", ])
+```
+
+```{R Tips}
+#SF ----
+Tips.sf <- list(tip_1 = rownames(sf@meta)[which(sf@meta$age == "36hpf" & sf@meta$annotation_optional == "optic retina")],
+                tip_2 = rownames(sf@meta)[which(sf@meta$age == "36hpf" & sf@meta$annotation_optional == "rpe")])
+
+for (i in seq_along(Tips.sf)) {
+  cells <- Tips.sf[[i]]
+  sf@group.ids[cells, "fs-Cluster"]     <- names(Tips.sf)[i]
+  sf@group.ids[cells, "fs-Cluster-Num"] <- as.character(i)
+}
+
+
+#CF ----
+Tips.cf <- list(tip_1 = rownames(cf@meta)[which(cf@meta$age == "36hpf" & cf@meta$annotation_optional == "optic retina")],
+                tip_2 = rownames(cf@meta)[which(cf@meta$age == "36hpf" & cf@meta$annotation_optional == "rpe")])
+
+for (i in seq_along(Tips.cf)) {
+  cells <- Tips.cf[[i]]
+  cf@group.ids[cells, "fs-Cluster"]     <- names(Tips.cf)[i]
+  cf@group.ids[cells, "fs-Cluster-Num"] <- as.character(i)
+}
+```
+
+
+## Random walks
+
+``` {R Random walks from Tips}
+#SF ----
+walks_sf <- lapply(names(Tips.sf), function(tip.name) {
+  cat(tip.name "is processing...\n")
+  simulateRandomWalk(
+    start.cells       = tip.cells[[tip.name]],
+    transition.matrix = biased.tm_sf,
+    end.cells         = root.cells_sf,
+    n                 = 50000,
+    end.visits        = 2,
+    verbose.freq      = 1000,
+    max.steps         = 5000
+  )
+})
+
+SF_walked <- sf
+for (i in seq_along(walks_sf)) {
+  SF_walked <- processRandomWalks(
+    object     = SF_walked,
+    walks      = walks[[i]],
+    walks.name = as.character(i),
+    verbose    = TRUE
+  )
+}
+
+
+tip.num <- SF_walked@group.ids[["fs-Cluster-Num"]]
+has.tip <- !is.na(tip.num)
+
+SF_walked@tree$cells.in.tip <- split(rownames(SF_walked@group.ids)[has.tip], tip.num[has.tip])
+SF_walked@tree$tips <- unique(tip.num[has.tip])
+
+saveRDS(SF_walked, ".../URD/SF_walked.RDS")
+
+
+#CF ----
+walks_cf <- lapply(names(Tips.cf), function(tip.name) {
+  cat(tip.name "is processing...\n")
+  simulateRandomWalk(
+    start.cells       = tip.cells[[tip.name]],
+    transition.matrix = biased.tm_cf,
+    end.cells         = root.cells_cf,
+    n                 = 50000,
+    end.visits        = 2,
+    verbose.freq      = 1000,
+    max.steps         = 5000
+  )
+})
+
+CF_walked <- cf
+for (i in seq_along(walks_cf)) {
+  CF_walked <- processRandomWalks(
+    object     = CF_walked,
+    walks      = walks[[i]],
+    walks.name = as.character(i),
+    verbose    = TRUE
+  )
+}
+
+
+tip.num <- CF_walked@group.ids[["fs-Cluster-Num"]]
+has.tip <- !is.na(tip.num)
+
+CF_walked@tree$cells.in.tip <- split(rownames(CF_walked@group.ids)[has.tip], tip.num[has.tip])
+CF_walked@tree$tips <- unique(tip.num[has.tip])
+
+saveRDS(CF_walked, ".../URD/CF_walked.RDS")
+```
+
+
+## Build the tree
+
+```{R Build the tree}
+#SF ----
+tree_SF <-  buildTree(SF_walked, "pseudotime",
+                      tips.use = c("1", "2"),
+                      divergence.method = "ks",
+                      weighted.fusion = T,
+                      cells.per.pseudotime.bin = 70,
+                      bins.per.pseudotime.window = 4,
+                      save.breakpoint.plots = ".../URD/Plots/Diagnostic_plot_SF",
+                      save.all.breakpoint.info = T,
+                      verbose = T)
+
+tree_SF <- nameSegments(tree_SF,
+                        segments = c("1", "2"),
+                        segment.names = c("Tip 1", "Tip 2"))
+
+saveRDS(tree_SF, ".../URD/Tree_SF.RDS")
+
+
+#CF ----
+tree_CF <-  buildTree(CF_walked, "pseudotime",
+                      tips.use = c("1", "2"),
+                      divergence.method = "ks",
+                      weighted.fusion = T,
+                      cells.per.pseudotime.bin = 70,
+                      bins.per.pseudotime.window = 4,
+                      save.breakpoint.plots = ".../URD/Plots/Diagnostic_plot_CF",
+                      save.all.breakpoint.info = T,
+                      verbose = T)
+
+tree_CF <- nameSegments(tree_CF,
+                        segments = c("1", "2"),
+                        segment.names = c("Tip 1", "Tip 2"))
+
+saveRDS(tree_CF, ".../URD/Tree_CF.RDS")
+```
+
+
+## Plot the tree
+
+```{R Plot the tree}
+#SF
+plotTree(object = tree_SF,
+         label = "age", # To be replaced by other metadata or the name of a gene  
+         cell.alpha = 1,
+         label.segments = T,
+         cell.size = 1.5) +
+  ggtitle("... - Surface")
+
+ggsave(".../URD/Plots/Tree_surface.pdf", width=8, height=5)
+
+#CF
+plotTree(object = tree_CF,
+         label = "age",
+         cell.alpha = 1,
+         label.segments = T,
+         cell.size = 1.5) +
+  ggtitle("... - Cave")
+
+ggsave(".../URD/Plots/Tree_cave.pdf", width=8, height=5)
+```
+
