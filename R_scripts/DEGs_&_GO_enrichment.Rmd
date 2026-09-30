@@ -45,17 +45,17 @@ stages <- unique(se$age)
 df_deg <- list()
 for (i in stages) {
   print(i)
-  se <- subset(ecto,age %in% i)
-  Idents(se) <- "condition"
+  sub <- subset(se,age %in% i)
+  Idents(sub) <- "condition"
   markers <- FindMarkers(
-    object = se,
+    object = sub,
     ident.1 = "surface", 
     ident.2 = "cave",
     logfc.threshold = 0.5)
   
   markers <- rownames_to_column(markers, var = "gene")
   df_deg[[i]] <- markers
-  rm(markers, se)
+  rm(markers, sub)
 }
 
 # 3. Raw data
