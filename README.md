@@ -12,7 +12,7 @@ Allow to navigate in the snRNA-seq data from *Astyanax mexicanus* and reproduce 
 - Visualisation (PCA, UMAP)
 - Pseudotime analysis (on different type of tissues)
 - Study of heterochronies between the two morphotypes (Half-heigh analysis)
-- Inference of cell trajectories (using URD)
+- Inference of cell trajectories (using [URD](https://github.com/farrellja/URD))
 
 ## Who is working on this Github project?
 ### [From the DECA laboratory](https://neuropsi.cnrs.fr/equipe-sylvie-retaux/)
