@@ -20,7 +20,7 @@ Allow to navigate in the snRNA-seq data from *Astyanax mexicanus* and reproduce 
 - Jorge Torres Paz
 - François Agnès
 - Goran Royer
-### From Jabaudon lab
+### [From Jabaudon lab](https://neurocenter-unige.ch/research-groups/denis-jabaudon/)
 - Sergi Roig Puiggros
 - Julien Prado
 - Denis Jabaudon
