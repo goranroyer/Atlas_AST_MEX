@@ -18,6 +18,7 @@ Allow to navigate in the snRNA-seq data from *Astyanax mexicanus* and reproduce 
 ### [From the DECA laboratory](https://neuropsi.cnrs.fr/equipe-sylvie-retaux/)
 - Sylvie Retaux
 - Jorge Torres Paz
+- Julien Leclercq
 - François Agnès
 - Goran Royer
 ### [From Jabaudon lab](https://neurocenter-unige.ch/research-groups/denis-jabaudon/)
